@@ -8,6 +8,7 @@ type numbers []int
 //Define a receiver function
 // The below function receives a slice of numbers and
 // returns another slice with all the numbers doubled.
+//In the below example myprint is a function accessible to all variables of type numbers.
 func (mynums numbers) myprint() numbers {
 	double_nums := numbers{}
 	for i, num := range mynums {
