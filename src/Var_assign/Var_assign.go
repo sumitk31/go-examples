@@ -1,5 +1,5 @@
-line   28:
-E319: Sorry, the command is not available in this version: syntime report
+package main
+
 import "fmt"
 
 func main() {
