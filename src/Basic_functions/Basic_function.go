@@ -3,7 +3,7 @@ package main
 import "fmt"
 
 func return_string() string {
-	return "Returning this"
+	return "Returning this string"
 }
 
 func main() {
