@@ -1,9 +1,6 @@
 package main
 
-import "fmt"
-import "net/http"
-
-func main() {
+/*func main() {
 	b1 := make([]byte, 100)
 	var num int
 	var err error
@@ -11,4 +8,4 @@ func main() {
 	fmt.Println("\n Error", err)
 	num, err = resp.Body.Read(b1)
 	fmt.Println(string(b1), err, num)
-}
+}*/
