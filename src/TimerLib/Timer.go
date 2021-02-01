@@ -28,18 +28,18 @@ func basicExpHandler(val int) {
 
 func (gt goTimer) startTimer(tw *timerWheel) {
 	//f gt.tval > tw.numSlots {
-	gt.r = gt.tval * gt.exp_count / tw.numSlots //+ tw.R
+	gt.r = gt.tval * gt.exp_count / tw.numSlots
 
-	//}
+	
 	tw.slot[(gt.tval+tw.curSlot)%tw.numSlots] = gt
 	tw.slot[(gt.tval+tw.curSlot)%tw.numSlots].evtHand = basicExpHandler
 
-	//fmt.Println(gt.tval, "  ", gt.evt)
+	
 }
 
 func (tw *timerWheel) startWheel(c chan string) {
 	for {
-		//fmt.Println("inside timer wheel", tw.curSlot, tw.R)
+		
 		fmt.Println("TW R = ", tw.R, " cur slot = ", tw.curSlot, " r = ", tw.slot[tw.curSlot].r)
 		if tw.slot[tw.curSlot].evtHand != nil {
 
