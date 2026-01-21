@@ -7,7 +7,7 @@
 
 
 # ---------- Build Stage ----------
-FROM alpine:3.22 as builder
+FROM alpine:3.23 as builder
 
 ENV REDIS_TIMESERIES_VERSION=1.10.13
 
