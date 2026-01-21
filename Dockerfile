@@ -1,125 +1,213 @@
-FROM quay.io/centos/centos:stream10 as buildsrc
+#------------------------------------------------------------------
+# Dockerfile - Dockerfile of NOSi environment
+#
+# Copyright (c) 2021-2025 by Cisco Systems, Inc., and/or its affiliates.
+# All rights reserved.
+#------------------------------------------------------------------
 
 
-RUN dnf update -y && dnf groupinstall -y "Development Tools" && \
-    dnf install -y rpm-build redhat-rpm-config attr libacl-devel libselinux-devel policycoreutils
+# ---------- Build Stage ----------
+FROM alpine:3.22 as builder
 
-RUN dnf --enablerepo=crb install -y texinfo
+ENV REDIS_TIMESERIES_VERSION=1.10.13
+
+RUN apk add --no-cache \
+    bash \
+    coreutils \
+    git \
+    cmake \
+    automake \
+    autoconf \
+    libtool \
+    build-base \
+    openssl-dev \
+    make \
+    python3 \
+    py3-pip \
+    py3-virtualenv
+
+# Clone and build RedisTimeSeries
+WORKDIR /build
+RUN git clone --branch v${REDIS_TIMESERIES_VERSION} https://github.com/RedisTimeSeries/RedisTimeSeries.git \
+    && cd RedisTimeSeries \
+    && git submodule update --init --recursive \
+    && make \
+    && mkdir -p /build/artifacts \
+    && cp bin/linux-x64-release/redistimeseries.so /build/artifacts/
+
+# ---------- Runtime Stage ----------
+FROM redis:7.2.12-alpine as build_alp
+#RUN apk add py3-setuptools
+RUN apk add --no-cache python3 py3-pip
+#RUN apk add  py3-virtualenv
+COPY --from=builder /build/artifacts/redistimeseries.so /usr/lib/redis/modules/redistimeseries.so
+
+#FROM python:3.12.9-alpine3.21 as python3
+#FROM alpine:3.22 as python3
+#FROM redislabs/redistimeseries:1.10.12 as build
+#COPY --from=python3 / /
+RUN mkdir -p /data1
+ARG PLATFORM
+ARG USE_CASES
+ARG FILE_DIR
+ARG SUPERD_CONF
+
+COPY redis/redis.primary.conf /usr/local/etc/redis/redis.conf
+RUN ls -l .
+############## To be used in future if we need to patch a fix in the image.####################
+#RUN apk add alpine-sdk
+# Create a group and user
+#RUN adduser -S packager -G abuild
+#COPY libgcrypt_build /abuild
+#RUN  chown packager /abuild
+# Tell docker that all future commands should run as the appuser user
+#USER packager
+#RUN abuild-keygen -a -n
+#RUN cd /abuild && abuild -r || true
+#USER root
+############## To be used in future if we need to patch a fix in the image.####################
+
+RUN mkdir -p /var/log/nos-i
+COPY $SUPERD_CONF /etc/supervisor/conf.d/supervisord.conf
+COPY strip_all.py /usr/bin
+RUN ls -l /usr/bin/strip_all.py
+COPY requirements.txt /data1/
+RUN ls -l /data1/requirements.txt
+#COPY ./requirements.txt .
+RUN echo " requirements.txt is:" && ls -l /data1/requirements.txt && cat /data1/requirements.txt
+RUN sed -i 's/https/http/' /etc/apk/repositories
+RUN   apk update \
+      && apk upgrade \
+      && apk add  file \
+      && apk add  git \
+      && apk add  -u c-ares \
+      && apk add  -u pcre \
+      && apk add  -u zlib \
+      && apk add  -u py3-pycares \
+      && apk add  -u grpc \
+      && apk add  -u py3-grpcio \
+      && apk add  -u make \
+      && apk add  -u bash \
+      && apk add  -u libgcrypt \
+      && apk add  supervisor \
+      && apk add  --no-cache logrotate
+
+# Debug / Development mode utilities
+RUN if [ "$FILE_DIR" = "src" ]; then \
+    apk add vim; \
+    pip3 install --break-system-packages  pytest; \
+    pip3 install --break-system-packages  pytest-cov; \
+    pip3 install --break-system-packages  pytest-ordering; \
+    fi
+RUN pip install --break-system-packages setuptools>=75.6.0
+RUN pip install --break-system-packages 'grpcio-tools>=1.65.4'\
+    && pip install --break-system-packages six\
+    && pip install --break-system-packages 'cryptography>=42.0.0'
+RUN apk add --no-cache ca-certificates && update-ca-certificates
+RUN ls -l /data1
+RUN pip3 install --break-system-packages -r /data1/requirements.txt
+RUN rm -f /usr/bin/python \
+    && rm -rf /root/.cache \
+    && rm -f /usr/bin/pip \
+    && ln -s /usr/bin/python3 /usr/bin/python \
+    && ln -s /usr/bin/pip3 /usr/bin/pip
+
+# CVE-2025-8194 Official Patch
+# (https://gist.github.com/sethmlarson/1716ac5b82b73dbcbf23ad2eff8b33e1)
+COPY cve_2025_8194_official.py /data1/
+COPY sitecustomize.py /data1/
+RUN chmod +x /data1/cve_2025_8194_official.py
+
+RUN cp /data1/sitecustomize.py /usr/lib/python3.12/site-packages/sitecustomize.py && \
+    echo "✓ CVE-2025-8194 official patch installed for automatic loading"
+
+WORKDIR /root
+RUN mkdir cisco-gnmi-python
+RUN git -c http.sslVerify=false clone http://github.com/cisco-ie/cisco-gnmi-python.git cisco-gnmi-python\
+    && cd cisco-gnmi-python\
+    && git submodule init\
+    && git submodule update\
+    && python setup.py sdist bdist_wheel\
+    && sed -i 's/pipenv run python/python/g' update_protos.sh\
+    && ./update_protos.sh\
+    && cp -r src/cisco_gnmi/ /usr/lib/python3.12/site-packages/
+    #&& cp src/cisco_gnmi/proto/*.py /usr/local/lib/python3.13/site-packages/cisco_gnmi/proto/
+
+RUN rm -rf /root/cisco-gnmi-python
+
+COPY csv_logs.logrotate /etc/logrotate.d/csv_logs
 
 
-RUN mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-RUN echo '%_topdir %(echo $HOME)/rpmbuild' > ~/.rpmmacros
+WORKDIR /data
+#RUN apt-get update
+#RUN apt-get upgrade -y libc6
+#RUN apt-get purge -y vim vim-common vim-runtime  build-essential *-dev-* *-dev* perl-modules-5.32 gcc gcc-10 cpp cpp-10 g++ g++-10 libgcc-10-dev libgcc-8-dev
+#RUN apt-get purge -y file
+RUN apk del git xz xz-libs krb5 krb5-libs
+RUN  rm -rf /usr/share/man/ /usr/share/cracklib /usr/share/doc /usr/share/locale/ \
+     && rm -rf /var/cache/apk/ \
+     && rm -rf /var/cache/apt \
+     && rm -rf /var/lib/apt \
+     && rm -rf /usr/lib/python3.12/__pycache__/ \
+     && rm -rf /root/.cache/pip\
+     && rm -rf /lib/x86_64-linux-gnu/libz.so.1.2.11
 
-FROM quay.io/centos/centos:stream10 as build
-RUN dnf update -y && \
-    dnf install -y --nobest bc vim git iproute tcpdump strace procps openssh-clients openssh-server iputils iptables \
-    net-tools zstd lsof file hostname lz4 less libatomic libevent libicu boost openssl nmap python3-pip openssl-devel bzip2-devel \
-    libffi-devel zlib zlib-devel cmake autoconf automake libtool gcc make  libpsl-devel && dnf clean all
+RUN ln -sf /hostetc/localtime /etc/localtime
+COPY sorted_set_purge/$FILE_DIR/ sorted_set_purge/
+COPY data_services/$FILE_DIR/ data_services/
+COPY pipeline_monitor/$FILE_DIR/ pipeline_monitor/
+COPY collector/$FILE_DIR/ collector/
+COPY metric_analyzer/$FILE_DIR/ metric_analyzer/
+COPY correlator/$FILE_DIR/ correlator/
+COPY action/$FILE_DIR/ action/
+COPY config/$FILE_DIR/ config/
+# To be removed after migrating all usecases
+#COPY config/src/usecases/ config/usecases/
+COPY common/$FILE_DIR/ common/
+COPY common/src/protos/ common/protos/
+WORKDIR /data1
+COPY tmp/ .
 
-RUN dnf --nogpgcheck --refresh --assumeyes --nodocs --setopt=install_weak_deps=False upgrade \
- && dnf --nogpgcheck --assumeyes --nodocs --setopt=install_weak_deps=False install createrepo_c dnf-utils gnupg \
- && dnf autoremove --assumeyes \
- && dnf clean all \
- && rm -rf /var/cache/dnf/* \
- && rm -rf /var/lib/dnf/yumdb/* \
- && rm -rf /var/lib/dnf/history/* \
- && rm -rf /tmp/* \
- && rm -rf /var/lib/rpm/__db.* \
- && rm -rf /usr/share/man/ /usr/share/cracklib /usr/share/doc /usr/share/locale/
+RUN /usr/bin/strip_all.py
+ENV PYTHONPATH "${PYTHONPATH}:/data"
+ENV PLATFORM $PLATFORM
+ENV USE_CASES $USE_CASES
 
- RUN dnf install -y  wget
- RUN wget https://yum.oracle.com/repo/OracleLinux/OL10/baseos/latest/x86_64/getPackage/libicu-74.2-5.el10_0.x86_64.rpm
- RUN rpm -Uvh libicu-74.2-5.el10_0.x86_64.rpm && rm -f libicu-74.2-5.el10_0.x86_64.rpm
+# Start with bash prompt in Debug / Development mode
+COPY ./start_services.sh /
+#CMD /start_services.sh
 
-# Build curl 8.16.0 from source for latest security fixes
- RUN curl -LO https://curl.se/download/curl-8.16.0.tar.gz
- RUN tar -xf curl-8.16.0.tar.gz
- RUN cd curl-8.16.0 && \
-     ./configure --with-openssl --enable-ipv6 --disable-static --prefix=/usr && \
-     make -j$(nproc) && \
-     make install
- RUN rm -rf curl-8.16.0 curl-8.16.0.tar.gz
- RUN dnf remove -y wget
+#this basically flattens all the layers to single layer reducing the image size
+#FROM scratch
 
+ARG PLATFORM
+ARG USE_CASES
+ARG FILE_DIR
+ARG SUPERD_CONF
 
-# Remove system python3-pip to eliminate old bundled packages (requests 2.31.0, certifi 2023.07.22)
-RUN dnf remove -y python3-pip && dnf clean all
-# Reinstall pip fresh and install required packages
-RUN python3 -m ensurepip --upgrade
-RUN python3 -m pip install --upgrade "pip>=25.1"
+ENV PYTHONPATH "${PYTHONPATH}:/data"
+ENV PLATFORM $PLATFORM
+ENV USE_CASES $USE_CASES
 
-RUN pip3 install click hexdump networkx pyzmq tabulate zstd zstandard
-RUN pip3 install --upgrade setuptools
-RUN pip3 install --upgrade "requests>=2.32.4"
-RUN pip3 install --upgrade "certifi>=2024.7.4"
-RUN rm  -rf /usr/share/python3-wheels/pip-23.3.2-py3-none-any.whl
+# Suppress pkg_resources deprecation warning related to setuptools
+ENV PYTHONWARNINGS "ignore:pkg_resources is deprecated:UserWarning"
 
-# Build iperf3 with cjson integration
-RUN git clone https://github.com/DaveGamble/cJSON.git
-RUN git clone https://github.com/esnet/iperf.git
-#copy cjson files to iperf src
-RUN cp cJSON/cJSON.h iperf/src/
-RUN cp cJSON/cJSON.c iperf/src/
-#move cJSON.c/.h to cjson.c/h in iperf
-RUN mv iperf/src/cJSON.c iperf/src/cjson.c
-RUN mv iperf/src/cJSON.h iperf/src/cjson.h
-#update cjson.c with include change
-RUN sed -i 's/#include "cJSON.h"/#include "cjson.h"/' iperf/src/cjson.c
-RUN cd iperf && \
-    ./bootstrap.sh && \
-    ./configure &&  \
-    make -j$(nproc) && \
-    make install
+RUN rm -rf /etc/ssl/certs/* /usr/local/bin/gosu /usr/lib/x86_64-linux-gnu/libgcrypt.so.*
+RUN rm -rf /usr/share/ca-certificates/mozilla/
+RUN find /usr/local/lib/python3.12/ -name *.pem | xargs rm -f
+RUN find /usr/local/lib/python3.9/ -name *.pem | xargs rm -f
+RUN find /usr/lib/python3.12/ -name *.pem | xargs rm -f
+RUN rm -f /usr/lib/python3.12/ensurepip/_bundled/pip-*.whl || true
+RUN rm -f /usr/local/lib/python3.12/ensurepip/_bundled/pip-*.whl || true
+RUN rm -f /bin/tar
+# CVE-2025-8194 Final Check: Verify official patch is working
+RUN echo "=== CVE Security Status ===" && \
+    python3 --version && \
+    python3 -c "import sys; print(f'Python version: {sys.version_info}')" && \
+    echo "CVE-2025-8194: Testing official patch (Seth Larson's implementation)..." && \
+    cd /data1 && python3 cve_2025_8194_official.py && \
+    echo "✓ CVE-2025-8194 official patch verified" && \
+    echo "======================="
 
-RUN rm -rf /cJSON /iperf
-#copy iperf3 to /usr/bin
-RUN ln -s /usr/local/bin/iperf3 /usr/bin/iperf3
-
-# Clone and fix bunch manually
-RUN git clone https://github.com/dsc/bunch.git
-RUN dnf remove -y  git*
-#RUN curl -L https://github.com/dsc/bunch/archive/refs/tags/1.0.1.tar.gz | tar xz && \
-RUN    sed -i "s/'rU'/'r'/" bunch/setup.py && \
-    pip3 install ./bunch
-
-RUN (cd /lib/systemd/system/sysinit.target.wants/; for i in *; do [ $i == \
-systemd-tmpfiles-setup.service ] || rm -f $i; done); \
-rm -f /lib/systemd/system/multi-user.target.wants/*;\
-rm -f /etc/systemd/system/*.wants/*;\
-rm -f /lib/systemd/system/local-fs.target.wants/*; \
-rm -f /lib/systemd/system/sockets.target.wants/*udev*; \
-rm -f /lib/systemd/system/sockets.target.wants/*initctl*; \
-rm -f /lib/systemd/system/basic.target.wants/*;\
-rm -f /lib/systemd/system/anaconda.target.wants/*;
-
-#remove cmake,autoconf,automake,libtool,gcc,make (build dependencies)
-RUN dnf remove -y cmake autoconf automake libtool gcc make  && dnf clean all
-#clean up dnf cache again
-RUN rm -rf /var/cache/dnf/* \
- && rm -rf /var/lib/dnf/yumdb/* \
- && rm -rf /var/lib/dnf/history/* \
- && rm -rf /tmp/* \
- && rm -rf /var/lib/rpm/__db.*
-
-#Clear dnf log and keep backup file.
-RUN mv /var/log/dnf.log /var/log/dnfbackup.log;
-
-RUN  ln -sf /hostetc/localtime /etc/localtime
-COPY netns.conf /usr/lib/tmpfiles.d/netns.conf
-COPY sandbox_firstboot.service /lib/systemd/system/sandbox_firstboot.service
-COPY sandbox_firstboot.sh /usr/bin/sandbox_firstboot.sh
-
-COPY sandbox_refresh_available_pkgs.service /lib/systemd/system/sandbox_refresh_available_pkgs.service
-COPY sandbox_refresh_available_pkgs.sh /usr/bin/sandbox_refresh_available_pkgs.sh
-
-#rm any pycache
-RUN rm -rf /usr/lib64/python3.12/__pycache__/ && rm -rf /root/.cache/pip
-RUN  systemctl enable sandbox_firstboot
-RUN  systemctl enable sandbox_refresh_available_pkgs
-
-FROM scratch
-COPY --from=build / /
-ENV container docker
-
-VOLUME [ "/sys/fs/cgroup" ]
-ENTRYPOINT ["/usr/lib/systemd/systemd"]
+# In production change path of starting supervisord without debug shell
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
