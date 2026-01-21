@@ -1,5 +1,5 @@
 # `dependabot.yml` file with updates
-# disabled for Docker and limited for npm
+# enabled for Docker and limited for npm
 
 version: 2
 updates:
