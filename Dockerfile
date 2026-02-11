@@ -36,7 +36,7 @@ RUN git clone --branch v${REDIS_TIMESERIES_VERSION} https://github.com/RedisTime
     && cp bin/linux-x64-release/redistimeseries.so /build/artifacts/
 
 # ---------- Runtime Stage ----------
-FROM redis:7.2.12-alpine as build_alp
+FROM redis:8.6.0-alpine as build_alp
 #RUN apk add py3-setuptools
 RUN apk add --no-cache python3 py3-pip
 #RUN apk add  py3-virtualenv
